@@ -8,8 +8,8 @@ Creates statistics for:
 - blkio write
 
 # Installation
-- Copy file to /etc/munin/plugins
-- chmod 0755 /etc/munin/plugins/docker_multigraph
+- Copy file to `/etc/munin/plugins`
+- `chmod 0755 /etc/munin/plugins/docker_multigraph`
 - Create config file:
 
 ```
@@ -17,3 +17,5 @@ root@host:~# cat /etc/munin/plugin-conf.d/docker.conf
 [docker_*]
 user root
 ```
+- Restart munin: `service munin-node restart`
+- Test: `munin-run --debug docker_multigraph`
