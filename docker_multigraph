@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+import sys
+import docker
+import threading
+import queue
+
+__author__ = 'Björn Braunschweig <bbrauns@gwdg.de>'
+
+
+# https://github.com/TomasTomecek/sen/blob/b52a7a55a7de64554da6a79ba963a1fcf9f5330d/sen/util.py#L162
+def calculate_cpu_percent(stats):
+    cpu_count = len(stats['cpu_stats']['cpu_usage']['percpu_usage'])
+    cpu_percent = 0.0
+    cpu_delta = float(stats['cpu_stats']['cpu_usage']['total_usage']) - \
+                float(stats['precpu_stats']['cpu_usage']['total_usage'])
+    system_delta = float(stats['cpu_stats']['system_cpu_usage']) - \
+                   float(stats['precpu_stats']['system_cpu_usage'])
+    if system_delta > 0.0:
+        cpu_percent = cpu_delta / system_delta * 100.0 * cpu_count
+    return cpu_percent
+
+
+def worker(container_name, q):
+    client = docker.from_env()
+    stats = client.containers.get(container_name).stats(stream=False)
+    q.put({'stats': stats, 'container_name': container_name})
+
+
+def get_stats_for_all(container_names):
+    """
+    Getting stats for a container via docker python api takes at least
+    2 seconds. Therefore schedule it in parallel.
+    """
+    threads = []
+    q = queue.Queue()
+    for container_name in container_names:
+        t = threading.Thread(target=worker, args=(container_name, q))
+        threads.append(t)
+        t.start()
+    for t in threads:
+        t.join()
+    all_stats = []
+    while not q.empty():
+        all_stats.append(q.get())
+    return all_stats
+
+
+def print_docker_blkio_read(container_name, stats):
+    read_bytes = sum([obj['value'] for obj in stats['blkio_stats']['io_service_bytes_recursive'] if
+                      obj['op'].lower() == 'read'])
+    print(container_name + '.value ' + str(read_bytes))
+
+
+def print_docker_blkio_write(container_name, stats):
+    read_bytes = sum([obj['value'] for obj in stats['blkio_stats']['io_service_bytes_recursive'] if
+                      obj['op'].lower() == 'write'])
+    print(container_name + '.value ' + str(read_bytes))
+
+
+def print_docker_network_rx(container_name, stats):
+    networks = stats.get('networks', None)
+    if networks is not None:
+        memory_usage = networks['eth0']['rx_bytes']
+        print(container_name + '.value ' + str(memory_usage))
+
+
+def print_docker_network_tx(container_name, stats):
+    networks = stats.get('networks', None)
+    if networks is not None:
+        memory_usage = networks['eth0']['tx_bytes']
+        print(container_name + '.value ' + str(memory_usage))
+
+
+def print_docker_cpu(container_name, stats):
+    cpu_usage = calculate_cpu_percent(stats)
+    print(container_name + '.value ' + str(cpu_usage))
+
+
+def print_docker_memory(container_name, stats):
+    memory_usage = stats['memory_stats']['usage']
+    print(container_name + '.value ' + str(memory_usage))
+
+
+def main():
+    client = docker.from_env()
+    container_names = [c.name for c in client.containers.list()]
+    graphs = [{'config_values': ['multigraph docker_cpu',
+                                 'graph_title Docker container CPU usage',
+                                 'graph_args --base 1000 -r --lower-limit 0 --upper-limit 100',
+                                 'graph_vlabel %',
+                                 'graph_scale no',
+                                 'graph_period second',
+                                 'graph_category container',
+                                 'graph_info This graph shows docker container CPU usage.'],
+               'config_data_values': ['{0}.label {0}', '{0}.draw LINE2', '{0}.min 0'],
+               'print_func': print_docker_cpu},
+              {'config_values': ['multigraph docker_memory',
+                                 'graph_title Docker container memory usage',
+                                 'graph_args --base 1024 --lower-limit 0',
+                                 'graph_vlabel Bytes',
+                                 'graph_category container',
+                                 'graph_info This graph shows docker container memory usage.'],
+               'config_data_values': ['{0}.label {0}', '{0}.draw LINE2', '{0}.min 0'],
+               'print_func': print_docker_memory},
+              {'config_values': ['multigraph docker_network_rx',
+                                 'graph_title Docker container network received',
+                                 'graph_args --base 1024 --lower-limit 0',
+                                 'graph_vlabel Bytes',
+                                 'graph_category container',
+                                 'graph_info This graph shows docker container network received bytes'],
+               'config_data_values': ['{0}.label {0}', '{0}.draw LINE2'],
+               'print_func': print_docker_network_rx},
+              {'config_values': ['multigraph docker_network_tx',
+                                 'graph_title Docker container network transmitted',
+                                 'graph_args --base 1024 --lower-limit 0',
+                                 'graph_vlabel Bytes',
+                                 'graph_category container',
+                                 'graph_info This graph shows docker container network transmitted bytes'],
+               'config_data_values': ['{0}.label {0}', '{0}.draw LINE2'],
+               'print_func': print_docker_network_tx},
+              {'config_values': ['multigraph docker_blkio_write',
+                                 'graph_title Docker container block io write',
+                                 'graph_args --base 1024 --lower-limit 0',
+                                 'graph_vlabel Bytes',
+                                 'graph_category container',
+                                 'graph_info This graph shows docker container block io write bytes'],
+               'config_data_values': ['{0}.label {0}', '{0}.draw LINE2'],
+               'print_func': print_docker_blkio_write},
+              {'config_values': ['multigraph docker_blkio_read',
+                                 'graph_title Docker container block io read',
+                                 'graph_args --base 1024 --lower-limit 0',
+                                 'graph_vlabel Bytes',
+                                 'graph_category container',
+                                 'graph_info This graph shows docker container block io read bytes'],
+               'config_data_values': ['{0}.label {0}', '{0}.draw LINE2'],
+               'print_func': print_docker_blkio_read}
+              ]
+
+    if len(sys.argv) > 1 and sys.argv[1] == 'config':
+        for graph in graphs:
+            for cv in graph['config_values']:
+                print(cv)
+            for container_name in container_names:
+                for cvd in graph['config_data_values']:
+                    print(cvd.format(container_name))
+    else:
+        all_stats = get_stats_for_all(container_names)  # dict: {'container_name': ..., 'stats': ...}
+        for graph in graphs:
+            print(graph['config_values'][0])  # print only eg. 'multigraph docker_cpu'
+            for stats_data in all_stats:
+                graph['print_func'](stats_data['container_name'],
+                                    stats_data['stats'])
+
+
+if __name__ == '__main__':
+    main()
